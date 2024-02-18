@@ -13,6 +13,15 @@
 #define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
 
 std::vector<torch::Tensor> pscan_forward(torch::Tensor A, torch::Tensor X) {
+  // std::cout << "pscan_forward" << std::endl;
+  /*
+  deltaA.shape:  torch.Size([1, 1536, 14, 16])
+  x.shape:  torch.Size([1, 1536, 16])                                                                        
+  deltaB_u.shape:  torch.Size([1, 1536, 14, 16])
+  u.shape:  torch.Size([1, 1536, 14]) 14
+  */
+
+  // A [bsize, dim, seqlen], X [bsize, seqlen, dim]
   CHECK_INPUT(A);
   CHECK_INPUT(X);
   torch::Tensor X_ = pscan_cuda_wrapper<false>(A, X);

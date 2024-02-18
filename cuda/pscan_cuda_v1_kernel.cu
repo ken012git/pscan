@@ -3,10 +3,14 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
+#include <cuda_fp16.h>
 #include <ATen/cuda/CUDAContext.h>
 
 #include <vector>
 #include "pscan_cuda_v1.cuh"
+
+#include <iostream>
+#include <stdio.h>
 
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
 template <typename T>
@@ -24,11 +28,31 @@ void check(T err, const char *const func, const char *const file,
 
 template <typename T>
 struct PairScalar;
+
+template <>
+struct PairScalar<int8_t>
+{
+    typedef char2 type;
+};
+
+template <>
+struct PairScalar<int>
+{
+    typedef int2 type;
+};
+
+template <>
+struct PairScalar<at::Half>
+{
+    typedef half2 type;
+};
+
 template <>
 struct PairScalar<float>
 {
     typedef float2 type;
 };
+
 template <>
 struct PairScalar<double>
 {
@@ -42,7 +66,8 @@ struct MultAddFunctor
         vec_t
         operator()(const vec_t &a, const vec_t &b) const
     {
-        return {a.x * b.x, a.y * b.x + b.y};
+        // return {a.x * b.x, a.y * b.x + b.y};
+        return {__hmul(a.x, b.x), __hadd(__hmul(a.y, b.x), b.y)};
     }
 };
 
@@ -172,13 +197,15 @@ const int BLOCK_ROWS = 8;
 template <typename scalar_t>
 __global__ void transposeNoBankConflicts(scalar_t *odata, const scalar_t *idata, const int stride)
 {
-    __shared__ scalar_t tile[TILE_DIM][TILE_DIM + 1];
+    __shared__ scalar_t tile[TILE_DIM][TILE_DIM + 1]; // [32][33]
 
-    int offset = blockIdx.z * stride;
-    int x = blockIdx.x * TILE_DIM + threadIdx.x;
-    int y = blockIdx.y * TILE_DIM + threadIdx.y;
-    int width = gridDim.x * TILE_DIM;
-    int height = gridDim.y * TILE_DIM;
+    int offset = blockIdx.z * stride; // z
+    int x = blockIdx.x * TILE_DIM + threadIdx.x; // x * 32 + x
+    int y = blockIdx.y * TILE_DIM + threadIdx.y; // y * 32 + y
+    int width = gridDim.x * TILE_DIM; // 8*32=256
+    int height = gridDim.y * TILE_DIM; // 64*32=2048
+
+    // printf("(%d, %d) | (%d, %d, %d), (%d, %d)\n", gridDim.x, gridDim.y, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y);
 
     if (x < width)
     {
@@ -213,25 +240,105 @@ __global__ void transposeNoBankConflicts(scalar_t *odata, const scalar_t *idata,
 template <bool REVERSE>
 torch::Tensor pscan_cuda_wrapper(torch::Tensor A, torch::Tensor X)
 {
-    const auto batch_size = A.size(0);
-    const auto state_size = A.size(2);
-    const auto dim_size = A.size(1);
+    // std::cout << "pscan_cuda_wrapper" << std::endl;
+    // std::cout << "X.stride(0): " << X.stride(0) << std::endl;
+    /*
+    deltaA.shape:  torch.Size([1, 1536, 14, 16])
+    x.shape:  torch.Size([1, 1536, 16])                                                                        
+    deltaB_u.shape:  torch.Size([1, 1536, 14, 16])
+    u.shape:  torch.Size([1, 1536, 14]) 14
+    */
+    // A [bsize, dim, seqlen], X [bsize, seqlen, dim]
+    // torch.Size([384, 256, 2048]) torch.Size([384, 2048, 256])
+    const auto batch_size = A.size(0); // bsize = 384
+    const auto state_size = A.size(2); // seqlen  = 2048
+    const auto dim_size = A.size(1);   // x dim = 256
 
     size_t const num_streams{4};
-    const int offset = (batch_size / num_streams) * state_size * dim_size;
+    const int offset = (batch_size / num_streams) * state_size * dim_size; // (384 / 4) * 2048 * 256 = 50331648
 
     std::vector<cudaStream_t> streams(num_streams);
-    torch::Tensor X_ = torch::empty({X.size(0), X.size(2), X.size(1)}, X.options());
+    torch::Tensor X_ = torch::empty({X.size(0), X.size(2), X.size(1)}, X.options()); // [bsize, dim, seqlen] = [384, 256, 2048]
 
     for (size_t i = 0; i < num_streams; ++i){
         CHECK_CUDA_ERROR(cudaStreamCreate(&streams[i]));
     }
 
-    AT_DISPATCH_FLOATING_TYPES(A.type(), "pscan_transpose_cuda", ([&]
+    /* --------------- All type (Not working) --------------- */
+    // AT_DISPATCH_ALL_TYPES(A.type(), "pscan_transpose_cuda", ([&]
+    //                                                               {
+    //     for (size_t i = 0; i < num_streams; ++i){
+    //         dim3 dimGrid(dim_size/TILE_DIM, state_size/TILE_DIM, batch_size / num_streams); // (8. 64, 96),  256 / 32, 2048 / 32, 384 / 4
+    //         dim3 dimBlock(TILE_DIM, BLOCK_ROWS, 1); // 32, 8, 1
+    //         transposeNoBankConflicts<<<dimGrid, dimBlock, 0, streams[i]>>>(
+    //             X_.data<scalar_t>()+ offset*i,
+    //             X.data<scalar_t>() + offset*i,
+    //             X.stride(0)
+    //         );
+    //     } }));
+
+    // const int threads = 1024;
+    // const int elements_per_thread = 2;
+
+    // AT_DISPATCH_ALL_TYPES(A.type(), "pscan_forward_cuda", ([&]
+    //                                                             {
+    // for(size_t i = 0; i < num_streams; ++i){
+    //     const auto blocks = dim3(batch_size / num_streams, dim_size, 1);
+
+    //     typedef typename PairScalar<scalar_t>::type pair_type;
+    //     auto block_scan_temp_bytes = archs_max_bytes<pair_type, threads, 700, 800, 860>;
+    //     auto smem_size = (std::max)(1 * sizeof(pair_type), block_scan_temp_bytes);
+    
+    //     pscan_cuda_forward_kernel<scalar_t, elements_per_thread, threads, REVERSE><<<blocks, threads, smem_size, streams[i]>>>(
+    //         A.data<scalar_t>() + offset*i,
+    //         X_.data<scalar_t>() + offset*i,
+    //         dim_size,
+    //         state_size
+    //     );
+    // } }));
+
+
+
+    /* --------------- FP32 --------------- */
+    // AT_DISPATCH_FLOATING_TYPES(A.type(), "pscan_transpose_cuda", ([&]
+    //                                                               {
+    //     for (size_t i = 0; i < num_streams; ++i){
+    //         dim3 dimGrid(dim_size/TILE_DIM, state_size/TILE_DIM, batch_size / num_streams); // (8. 64, 96),  256 / 32, 2048 / 32, 384 / 4
+    //         dim3 dimBlock(TILE_DIM, BLOCK_ROWS, 1); // 32, 8, 1
+    //         transposeNoBankConflicts<<<dimGrid, dimBlock, 0, streams[i]>>>(
+    //             X_.data<scalar_t>()+ offset*i,
+    //             X.data<scalar_t>() + offset*i,
+    //             X.stride(0)
+    //         );
+    //     } }));
+
+    // const int threads = 1024;
+    // const int elements_per_thread = 2;
+
+    // AT_DISPATCH_FLOATING_TYPES(A.type(), "pscan_forward_cuda", ([&]
+    //                                                             {
+    // for(size_t i = 0; i < num_streams; ++i){
+    //     const auto blocks = dim3(batch_size / num_streams, dim_size, 1);
+
+    //     typedef typename PairScalar<scalar_t>::type pair_type;
+    //     auto block_scan_temp_bytes = archs_max_bytes<pair_type, threads, 700, 800, 860>;
+    //     auto smem_size = (std::max)(1 * sizeof(pair_type), block_scan_temp_bytes);
+    
+    //     pscan_cuda_forward_kernel<scalar_t, elements_per_thread, threads, REVERSE><<<blocks, threads, smem_size, streams[i]>>>(
+    //         A.data<scalar_t>() + offset*i,
+    //         X_.data<scalar_t>() + offset*i,
+    //         dim_size,
+    //         state_size
+    //     );
+    // } }));
+
+
+    /* --------------- FP16 --------------- */
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(A.type(), "pscan_transpose_cuda", ([&]
                                                                   {
         for (size_t i = 0; i < num_streams; ++i){
-            dim3 dimGrid(dim_size/TILE_DIM, state_size/TILE_DIM, batch_size / num_streams);
-            dim3 dimBlock(TILE_DIM, BLOCK_ROWS, 1);
+            dim3 dimGrid(dim_size/TILE_DIM, state_size/TILE_DIM, batch_size / num_streams); // (8. 64, 96),  256 / 32, 2048 / 32, 384 / 4
+            dim3 dimBlock(TILE_DIM, BLOCK_ROWS, 1); // 32, 8, 1
             transposeNoBankConflicts<<<dimGrid, dimBlock, 0, streams[i]>>>(
                 X_.data<scalar_t>()+ offset*i,
                 X.data<scalar_t>() + offset*i,
@@ -242,22 +349,56 @@ torch::Tensor pscan_cuda_wrapper(torch::Tensor A, torch::Tensor X)
     const int threads = 1024;
     const int elements_per_thread = 2;
 
-    AT_DISPATCH_FLOATING_TYPES(A.type(), "pscan_forward_cuda", ([&]
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(A.type(), "pscan_forward_cuda", ([&]
                                                                 {
     for(size_t i = 0; i < num_streams; ++i){
         const auto blocks = dim3(batch_size / num_streams, dim_size, 1);
 
-        typedef typename PairScalar<scalar_t>::type pair_type;
+        typedef typename PairScalar<at::Half>::type pair_type;
         auto block_scan_temp_bytes = archs_max_bytes<pair_type, threads, 700, 800, 860>;
         auto smem_size = (std::max)(1 * sizeof(pair_type), block_scan_temp_bytes);
     
-        pscan_cuda_forward_kernel<scalar_t, elements_per_thread, threads, REVERSE><<<blocks, threads, smem_size, streams[i]>>>(
-            A.data<scalar_t>() + offset*i,
-            X_.data<scalar_t>() + offset*i,
+        pscan_cuda_forward_kernel<at::Half, elements_per_thread, threads, REVERSE><<<blocks, threads, smem_size, streams[i]>>>(
+            A.data<at::Half>() + offset*i,
+            X_.data<at::Half>() + offset*i,
             dim_size,
             state_size
         );
     } }));
+
+
+    /* --------------- INT8 --------------- */
+    // AT_DISPATCH_INTEGRAL_TYPES(A.type(), "pscan_transpose_cuda", ([&]
+    //                                                               {
+    //     for (size_t i = 0; i < num_streams; ++i){
+    //         dim3 dimGrid(dim_size/TILE_DIM, state_size/TILE_DIM, batch_size / num_streams); // (8. 64, 96),  256 / 32, 2048 / 32, 384 / 4
+    //         dim3 dimBlock(TILE_DIM, BLOCK_ROWS, 1); // 32, 8, 1
+    //         transposeNoBankConflicts<<<dimGrid, dimBlock, 0, streams[i]>>>(
+    //             X_.data<scalar_t>()+ offset*i,
+    //             X.data<scalar_t>() + offset*i,
+    //             X.stride(0)
+    //         );
+    //     } }));
+
+    // const int threads = 1024;
+    // const int elements_per_thread = 2;
+
+    // AT_DISPATCH_INTEGRAL_TYPES(A.type(), "pscan_forward_cuda", ([&]
+    //                                                             {
+    // for(size_t i = 0; i < num_streams; ++i){
+    //     const auto blocks = dim3(batch_size / num_streams, dim_size, 1);
+
+    //     typedef typename PairScalar<int8_t>::type pair_type;
+    //     auto block_scan_temp_bytes = archs_max_bytes<pair_type, threads, 700, 800, 860>;
+    //     auto smem_size = (std::max)(1 * sizeof(pair_type), block_scan_temp_bytes);
+    
+    //     pscan_cuda_forward_kernel<int8_t, elements_per_thread, threads, REVERSE><<<blocks, threads, smem_size, streams[i]>>>(
+    //         A.data<int8_t>() + offset*i,
+    //         X_.data<int8_t>() + offset*i,
+    //         dim_size,
+    //         state_size
+    //     );
+    // } }));
 
     for (size_t i = 0; i < num_streams; ++i)
     {

@@ -5,11 +5,11 @@ torch.manual_seed(42)
 
 from fastpscan.original import fn as original_pscan_fn
 from fastpscan.cuda_v1 import fn as pscan_cuda_fn
-from fastpscan.cuda_v2 import fn as pscan_cuda_v2_fn
-from fastpscan.naive import fn as naive_pscan
-from fastpscan.heinsen import fn as heinsen_pscan
-from fastpscan.triton import fn as triton_pscan
-from fastpscan.cuda_proger import fn as pscan_cuda_proger
+# from fastpscan.cuda_v2 import fn as pscan_cuda_v2_fn
+# from fastpscan.naive import fn as naive_pscan
+# from fastpscan.heinsen import fn as heinsen_pscan
+# from fastpscan.triton import fn as triton_pscan
+# from fastpscan.cuda_proger import fn as pscan_cuda_proger
 
 
 if __name__ == "__main__":
@@ -17,19 +17,29 @@ if __name__ == "__main__":
 
 
     N, T, D = 384, 2048, 256
-    A = torch.rand(N, T, dtype=torch.float32).requires_grad_().cuda()
-    X = torch.rand(N, T, D, dtype=torch.float32).requires_grad_().cuda()
-    Y_init = torch.rand(N, D, dtype=torch.float32).requires_grad_().cuda()
+    # A = torch.rand(N, T, dtype=torch.float32).requires_grad_().cuda()
+    # X = torch.rand(N, T, D, dtype=torch.float32).requires_grad_().cuda()
+    # Y_init = torch.rand(N, D, dtype=torch.float32).requires_grad_().cuda()
 
-    t0 = benchmark.Timer(
-        stmt='original_pscan_fn(A, X, Y_init)',
-        setup='from __main__ import original_pscan_fn',
-        globals={'A': A, 'X': X, 'Y_init': Y_init})
+    # A = torch.ones(N, T, dtype=torch.int8).cuda()
+    # X = torch.ones(N, T, D, dtype=torch.int8).cuda()
+    # Y_init = torch.zeros(N, D, dtype=torch.int8).cuda()
+
+    A = torch.ones(N, T, dtype=torch.float16).cuda()
+    X = torch.ones(N, T, D, dtype=torch.float16).cuda()
+    Y_init = torch.zeros(N, D, dtype=torch.float16).cuda()
+
+    pscan_cuda_fn(A, X, Y_init)
+
+    # t0 = benchmark.Timer(
+    #     stmt='original_pscan_fn(A, X, Y_init)',
+    #     setup='from __main__ import original_pscan_fn',
+    #     globals={'A': A, 'X': X, 'Y_init': Y_init})
     
-    t1 = benchmark.Timer(
-        stmt='heinsen_pscan(A, X, Y_init)',
-        setup='from __main__ import heinsen_pscan',
-        globals={'A': A, 'X': X, 'Y_init': Y_init})
+    # t1 = benchmark.Timer(
+    #     stmt='heinsen_pscan(A, X, Y_init)',
+    #     setup='from __main__ import heinsen_pscan',
+    #     globals={'A': A, 'X': X, 'Y_init': Y_init})
     
 
     t2 = benchmark.Timer(
@@ -37,28 +47,32 @@ if __name__ == "__main__":
         setup='from __main__ import pscan_cuda_fn',
         globals={'A': A, 'X': X, 'Y_init': Y_init})
     
-    t3 = benchmark.Timer(
-        stmt='pscan_cuda_v2_fn(A, X, Y_init)',
-        setup='from __main__ import pscan_cuda_v2_fn',
-        globals={'A': A, 'X': X, 'Y_init': Y_init})
+    # t3 = benchmark.Timer(
+    #     stmt='pscan_cuda_v2_fn(A, X, Y_init)',
+    #     setup='from __main__ import pscan_cuda_v2_fn',
+    #     globals={'A': A, 'X': X, 'Y_init': Y_init})
     
-    t4 = benchmark.Timer(
-        stmt='triton_pscan(A, X, Y_init)',
-        setup='from __main__ import triton_pscan',
-        globals={'A': A, 'X': X, 'Y_init': Y_init})
+    # t4 = benchmark.Timer(
+    #     stmt='triton_pscan(A, X, Y_init)',
+    #     setup='from __main__ import triton_pscan',
+    #     globals={'A': A, 'X': X, 'Y_init': Y_init})
     
-    t5 = benchmark.Timer(
-        stmt='pscan_cuda_proger(A, X, Y_init)',
-        setup='from __main__ import pscan_cuda_proger',
-        globals={'A': A, 'X': X, 'Y_init': Y_init})
+    # t5 = benchmark.Timer(
+    #     stmt='pscan_cuda_proger(A, X, Y_init)',
+    #     setup='from __main__ import pscan_cuda_proger',
+    #     globals={'A': A, 'X': X, 'Y_init': Y_init})
 
-
+    # t6 = benchmark.Timer(
+    #     stmt='naive_pscan(A, X, Y_init)',
+    #     setup='from __main__ import naive_pscan',
+    #     globals={'A': A, 'X': X, 'Y_init': Y_init})
 
     
     
-    print(t0.timeit(100))
-    # print(t1.timeit(100))
+    # # print(t0.timeit(100))
+    # # print(t1.timeit(100))
     print(t2.timeit(100))
-    print(t3.timeit(100))
-    print(t4.timeit(100))
-    #print(t5.timeit(100))
+    # # print(t3.timeit(100))
+    # # print(t4.timeit(100))
+    # # print(t5.timeit(100))
+    # print(t6.timeit(100))
